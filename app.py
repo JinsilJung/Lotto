@@ -1,6 +1,8 @@
 import streamlit as st
 import pandas as pd
 import random
+import requests
+from datetime import datetime, timedelta
 from collections import Counter
 
 # ==========================================================
@@ -11,72 +13,43 @@ st.set_page_config(page_title="인생역전 로또 추천기", page_icon="🍀",
 # 로또 공 디자인 및 서약서 스타일링 CSS
 st.markdown("""
 <style>
-    /* 폰트 설정 */
     @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@400;700&display=swap');
     html, body, [class*="css"] {
         font-family: 'Noto Sans KR', sans-serif;
     }
-    
-    /* 로또 공 공통 스타일 */
     .lotto-ball {
         display: inline-block;
-        width: 45px;
-        height: 45px;
-        line-height: 45px;
-        border-radius: 50%;
-        text-align: center;
-        font-weight: bold;
-        color: white;
-        margin-right: 8px;
-        font-size: 20px;
+        width: 45px; height: 45px; line-height: 45px;
+        border-radius: 50%; text-align: center;
+        font-weight: bold; color: white;
+        margin-right: 8px; font-size: 20px;
         box-shadow: 2px 2px 5px rgba(0,0,0,0.3);
     }
-    /* 번호대별 색상 (한국 로또 기준) */
     .ball-1-10 { background-color: #fbc400; text-shadow: 1px 1px 2px rgba(0,0,0,0.5); }
     .ball-11-20 { background-color: #69c8f2; text-shadow: 1px 1px 2px rgba(0,0,0,0.5); }
     .ball-21-30 { background-color: #ff7272; text-shadow: 1px 1px 2px rgba(0,0,0,0.5); }
     .ball-31-40 { background-color: #aaaaaa; text-shadow: 1px 1px 2px rgba(0,0,0,0.5); }
     .ball-41-45 { background-color: #b0d840; text-shadow: 1px 1px 2px rgba(0,0,0,0.5); }
     
-    /* 서약서 박스 스타일 */
     .pledge-box {
-        background-color: #fffdf5;
-        padding: 20px;
-        border-radius: 15px;
-        border: 2px dashed #ff9900;
-        margin-bottom: 25px;
-        text-align: center;
-        color: #444;
+        background-color: #fffdf5; padding: 20px; border-radius: 15px;
+        border: 2px dashed #ff9900; margin-bottom: 25px;
+        text-align: center; color: #444;
     }
     .pledge-title {
-        font-size: 1.3rem;
-        font-weight: bold;
-        color: #d35400;
-        margin-bottom: 10px;
+        font-size: 1.3rem; font-weight: bold; color: #d35400; margin-bottom: 10px;
     }
-    
-    /* 게임 결과 카드 스타일 */
     .game-card {
-        background-color: white;
-        padding: 15px;
-        border-radius: 10px;
-        margin-bottom: 12px;
-        border-left: 6px solid #1f77b4;
-        box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-        display: flex;
-        align-items: center;
+        background-color: white; padding: 15px; border-radius: 10px;
+        margin-bottom: 12px; border-left: 6px solid #1f77b4;
+        box-shadow: 0 2px 4px rgba(0,0,0,0.1); display: flex; align-items: center;
     }
     .game-label {
-        font-weight: bold; 
-        font-size: 1.1em; 
-        margin-right: 20px; 
-        color: #333;
-        min-width: 80px;
+        font-weight: bold; font-size: 1.1em; margin-right: 20px; color: #333; min-width: 80px;
     }
 </style>
 """, unsafe_allow_html=True)
 
-# 로또 공 HTML 생성 함수
 def get_ball_html(num):
     if 1 <= num <= 10: color_class = "ball-1-10"
     elif 11 <= num <= 20: color_class = "ball-11-20"
@@ -86,26 +59,90 @@ def get_ball_html(num):
     return f'<div class="lotto-ball {color_class}">{num}</div>'
 
 # ==========================================================
-# 2. 데이터 로드
+# 2. 데이터 로드 및 자동 업데이트 로직 (핵심 변경점)
 # ==========================================================
-@st.cache_data
-def load_data():
+
+# (1) 오늘 날짜 기준 최신 회차 계산
+def get_latest_round():
+    # 로또 1회차: 2002년 12월 7일 (토)
+    start_date = datetime(2002, 12, 7, 20, 0, 0)
+    now = datetime.now()
+    
+    # 아직 이번 주 추첨 시간(토요일 20시) 전이라면 지난주까지만 계산
+    if now.weekday() == 5 and now.hour < 20: 
+        now = now - timedelta(days=1)
+        
+    diff = now - start_date
+    return (diff.days // 7) + 1
+
+# (2) 동행복권 API 호출 함수
+def fetch_lotto_round(drwNo):
+    url = f"https://www.dhlottery.co.kr/common.do?method=getLottoNumber&drwNo={drwNo}"
+    try:
+        response = requests.get(url, timeout=3)
+        data = response.json()
+        if data.get("returnValue") == "success":
+            # 당첨 번호 6개 + 보너스 번호 리스트로 반환
+            return [
+                data["drwtNo1"], data["drwtNo2"], data["drwtNo3"],
+                data["drwtNo4"], data["drwtNo5"], data["drwtNo6"],
+                data["bnusNo"]
+            ]
+    except:
+        pass
+    return None
+
+@st.cache_data(ttl=3600)  # 1시간마다 캐시 갱신 (서버 부하 방지)
+def load_and_update_data():
+    # A. 엑셀 파일 읽기 (기존 데이터)
     try:
         df = pd.read_excel('1st_lotto_bonus.xlsx', header=1)
-        return df
+        # 엑셀 데이터가 있으면 행 개수로 마지막 회차 추정
+        last_saved_index = len(df)
+        existing_data = df.values.tolist()
     except FileNotFoundError:
-        return None
+        existing_data = [] 
+        last_saved_index = 0
 
-df = load_data()
+    # B. 업데이트해야 할 회차 계산
+    current_round = get_latest_round()
+    new_data = []
+    
+    # C. 데이터가 부족하다면 부족한 만큼 API 호출
+    if last_saved_index < current_round:
+        start_drwNo = last_saved_index + 1
+        
+        # 순차적으로 API 호출 (최대 50주치만 자동 업데이트 - 속도 고려)
+        for drwNo in range(start_drwNo, current_round + 2):
+            if drwNo > start_drwNo + 50: break # 너무 많으면 중단
+            
+            lotto_nums = fetch_lotto_round(drwNo)
+            if lotto_nums:
+                new_data.append(lotto_nums)
+            else:
+                # API 호출 실패 시(아직 발표 전 등) 중단
+                break
+
+    # D. 데이터 합치기
+    # 기존 데이터(List) + 새 데이터(List)
+    total_data = existing_data + new_data
+    final_df = pd.DataFrame(total_data)
+    
+    return final_df, len(new_data)
+
+df, updated_count = load_and_update_data()
 
 # ==========================================================
-# 3. 사이드바 설정 (옵션 기능)
+# 3. 사이드바 설정
 # ==========================================================
 st.title("🎰 정진실의 데이터 기반 로또")
 st.markdown("##### 🍀 과거 데이터를 분석하여 **당신의 꿈**을 현실로 만들어 드립니다.")
 
-if df is None:
-    st.error("❌ '1st_lotto_bonus.xlsx' 파일을 찾을 수 없습니다. 파일을 업로드하거나 경로를 확인해주세요.")
+if updated_count > 0:
+    st.toast(f"📢 최신 {updated_count}주차 당첨 정보를 자동으로 가져왔습니다!", icon="✅")
+
+if df is None or df.empty:
+    st.error("❌ 데이터를 불러올 수 없습니다. 인터넷 연결을 확인해주세요.")
     st.stop()
 
 # --- 데이터 전처리 ---
@@ -114,7 +151,17 @@ past_history = set()
 all_past_nums = []
 
 for row in winning_numbers:
-    cleaned_row = [int(n) for n in row if pd.notna(n)]
+    # 데이터 정제: API 데이터(숫자)와 엑셀 데이터(문자 등 포함 가능성) 혼합 방지
+    # 1~45 사이의 정수만 확실하게 추출
+    cleaned_row = []
+    for n in row:
+        try:
+            val = int(n)
+            if 1 <= val <= 45:
+                cleaned_row.append(val)
+        except:
+            pass
+            
     all_past_nums.extend(cleaned_row)
     if len(cleaned_row) >= 6:
         main_nums = tuple(sorted(cleaned_row[:6]))
@@ -123,11 +170,8 @@ for row in winning_numbers:
 # --- 사이드바: 기능 제어 ---
 with st.sidebar:
     st.header("⚙️ 생성 옵션")
-    
-    # [기능 2] 게임 수 조절 (1~10개)
     game_count = st.slider("생성할 게임 수", min_value=1, max_value=10, value=5)
     
-    # [기능 3] 고정수(꿈 번호) 선택
     st.markdown("---")
     st.write("**💤 꿈에서 본 번호가 있나요?**")
     fixed_numbers = st.multiselect(
@@ -138,13 +182,15 @@ with st.sidebar:
     )
     
     st.info(f"📂 분석된 1등 데이터: **{len(past_history)}회**")
+    if updated_count > 0:
+        st.caption(f"(+최신 {updated_count}회 자동 반영됨)")
     st.caption("Created by 정진실")
 
 # ==========================================================
 # 4. 메인 기능: 서약서 및 생성
 # ==========================================================
 
-# [기능 1] 재미있는 서약서 섹션
+# [기능 1] 서약서
 st.markdown("""
 <div class="pledge-box">
     <div class="pledge-title">📜 대국민(?) 당첨 서약서</div>
@@ -154,14 +200,12 @@ st.markdown("""
 </div>
 """, unsafe_allow_html=True)
 
-# 서약 체크박스
 pledge_check = st.checkbox("네, 개발자님 마음 편하시게 서명합니다. ✍️ (체크해야 번호가 나옵니다)")
 
-# 버튼 클릭 로직
+# [기능 2] 번호 생성
 if st.button("🎲 행운의 번호 생성하기", type="primary", use_container_width=True):
-    
     if not pledge_check:
-        st.warning("⚠️ 서약서에 동의(체크)해주셔야 번호를 드릴 수 있습니다! (돈 달라고 안 할게요 😂)")
+        st.warning("⚠️ 서약서에 동의(체크)해주셔야 번호를 드릴 수 있습니다!")
     else:
         # --- 분석 로직 ---
         counts = Counter(all_past_nums)
@@ -169,25 +213,18 @@ if st.button("🎲 행운의 번호 생성하기", type="primary", use_container
 
         CUTOFF = 40        
         BOOST_LIMIT = 30   
-
         survivors = ranked_candidates[:CUTOFF]
         dropped = ranked_candidates[CUTOFF:]   
 
-        # 가중치 계산 준비
         max_freq = max(counts.values()) if counts else 100
-        
         my_games = []
         attempt_limit = 0
         
         while len(my_games) < game_count:
             attempt_limit += 1
-            if attempt_limit > 1000: break # 무한루프 방지
+            if attempt_limit > 1000: break 
             
-            # 1. 고정수(꿈 번호) 먼저 넣기
             selected_set = set(fixed_numbers)
-            
-            # 2. 남은 자리 채우기 (가중치 적용)
-            # 고정수는 후보군에서 제외 (이미 뽑았으니까)
             current_pool = [n for n in survivors if n not in selected_set]
             
             current_weights = []
@@ -195,36 +232,28 @@ if st.button("🎲 행운의 번호 생성하기", type="primary", use_container
                 freq = counts.get(num, 0)
                 w = (max_freq - freq) + 1
                 try:
-                    # 원래 순위에서의 인덱스로 가중치 부스트 적용
                     if survivors.index(num) < BOOST_LIMIT:
                         w = int(w * 2.0)
-                except ValueError:
-                    pass
+                except ValueError: pass
                 current_weights.append(w)
             
-            # 부족한 개수만큼 뽑기
             while len(selected_set) < 6:
-                if not current_pool: break # 만약 뽑을 풀이 없으면 중단
+                if not current_pool: break 
                 pick = random.choices(current_pool, weights=current_weights, k=1)[0]
                 selected_set.add(pick)
             
-            # 6개 완성 확인
             if len(selected_set) == 6:
                 guess = sorted(list(selected_set))
                 guess_tuple = tuple(guess)
-                
-                # 과거 1등 번호와 겹치지 않고, 이번 생성 목록에도 없으면 추가
                 if guess_tuple not in past_history and guess not in my_games:
                     my_games.append(guess)
 
-        # --- [기능 4] 세련된 결과 출력 ---
+        # --- 결과 출력 ---
         st.divider()
         st.subheader(f"🎉 {game_count}개의 행운 조합이 생성되었습니다!")
         
         for i, game in enumerate(my_games):
-            # HTML 생성
             ball_htmls = "".join([get_ball_html(num) for num in game])
-            
             st.markdown(f"""
             <div class="game-card">
                 <div class="game-label">GAME {i+1}</div>
@@ -232,9 +261,8 @@ if st.button("🎲 행운의 번호 생성하기", type="primary", use_container
             </div>
             """, unsafe_allow_html=True)
             
-        st.balloons() # 축하 효과
+        st.balloons() 
         
-        # 분석 정보 표시
         with st.expander("📊 분석 상세 정보 보기"):
             if fixed_numbers:
                 st.info(f"**💡 적용된 고정수:** {fixed_numbers}")
